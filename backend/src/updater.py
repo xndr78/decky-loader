@@ -1,23 +1,33 @@
+from __future__ import annotations
 import os
 import shutil
-import uuid
 from asyncio import sleep
-from ensurepip import version
 from json.decoder import JSONDecodeError
 from logging import getLogger
 from os import getcwd, path, remove
-from subprocess import call
+from typing import TYPE_CHECKING, List, TypedDict
+if TYPE_CHECKING:
+    from .main import PluginManager
+from .localplatform import chmod, service_restart, ON_LINUX, get_keep_systemd_service, get_selinux
 
 from aiohttp import ClientSession, web
 
-import helpers
-from injector import get_gamepadui_tab, inject_to_tab
-from settings import SettingsManager
+from . import helpers
+from .injector import get_gamepadui_tab
+from .settings import SettingsManager
 
 logger = getLogger("Updater")
 
+class RemoteVerAsset(TypedDict):
+    name: str
+    browser_download_url: str
+class RemoteVer(TypedDict):
+    tag_name: str
+    prerelease: bool
+    assets: List[RemoteVerAsset]
+
 class Updater:
-    def __init__(self, context) -> None:
+    def __init__(self, context: PluginManager) -> None:
         self.context = context
         self.settings = self.context.settings
         # Exposes updater methods to frontend
@@ -28,12 +38,9 @@ class Updater:
             "do_restart": self.do_restart,
             "check_for_updates": self.check_for_updates
         }
-        self.remoteVer = None
-        self.allRemoteVers = None
-        try:
-            self.localVer = helpers.get_loader_version()
-        except:
-            self.localVer = False
+        self.remoteVer: RemoteVer | None = None
+        self.allRemoteVers: List[RemoteVer] = []
+        self.localVer = helpers.get_loader_version()
 
         try:
             self.currentBranch = self.get_branch(self.context.settings)
@@ -47,7 +54,7 @@ class Updater:
             ])
             context.loop.create_task(self.version_reloader())
 
-    async def _handle_server_method_call(self, request):
+    async def _handle_server_method_call(self, request: web.Request):
         method_name = request.match_info["method_name"]
         try:
             args = await request.json()
@@ -55,7 +62,7 @@ class Updater:
             args = {}
         res = {}
         try:
-            r = await self.updater_methods[method_name](**args)
+            r = await self.updater_methods[method_name](**args) # type: ignore
             res["result"] = r
             res["success"] = True
         except Exception as e:
@@ -68,11 +75,13 @@ class Updater:
         logger.debug("current branch: %i" % ver)
         if ver == -1:
             logger.info("Current branch is not set, determining branch from version...")
-            if self.localVer.startswith("v") and self.localVer.find("-pre"):
+            if self.localVer.startswith("v") and "-pre" in self.localVer:
                 logger.info("Current version determined to be pre-release")
+                manager.setSetting('branch', 1)
                 return 1
             else:
                 logger.info("Current version determined to be stable")
+                manager.setSetting('branch', 0)
                 return 0
         return ver
 
@@ -94,30 +103,36 @@ class Updater:
         return str(url)
 
     async def get_version(self):
-        if self.localVer:
-            return {
-                "current": self.localVer,
-                "remote": self.remoteVer,
-                "all": self.allRemoteVers,
-                "updatable": self.localVer != None
-            }
-        else:
-            return {"current": "unknown", "remote": self.remoteVer, "all": self.allRemoteVers, "updatable": False}
+        return {
+            "current": self.localVer,
+            "remote": self.remoteVer,
+            "all": self.allRemoteVers,
+            "updatable": self.localVer != "unknown"
+        }
 
     async def check_for_updates(self):
         logger.debug("checking for updates")
         selectedBranch = self.get_branch(self.context.settings)
         async with ClientSession() as web:
             async with web.request("GET", "https://api.github.com/repos/SteamDeckHomebrew/decky-loader/releases", ssl=helpers.get_ssl_context()) as res:
-                remoteVersions = await res.json()
+                remoteVersions: List[RemoteVer] = await res.json()
+                if selectedBranch == 0:
+                    logger.debug("release type: release")
+                    remoteVersions = list(filter(lambda ver: ver["tag_name"].startswith("v") and not ver["prerelease"] and not ver["tag_name"].find("-pre") > 0 and ver["tag_name"], remoteVersions))
+                elif selectedBranch == 1:
+                    logger.debug("release type: pre-release")
+                    remoteVersions = list(filter(lambda ver:ver["tag_name"].startswith("v"), remoteVersions))
+                else:
+                    logger.error("release type: NOT FOUND")
+                    raise ValueError("no valid branch found")
         self.allRemoteVers = remoteVersions
         logger.debug("determining release type to find, branch is %i" % selectedBranch)
         if selectedBranch == 0:
             logger.debug("release type: release")
-            self.remoteVer = next(filter(lambda ver: ver["tag_name"].startswith("v") and not ver["prerelease"] and ver["tag_name"], remoteVersions), None)
+            self.remoteVer = next(filter(lambda ver: ver["tag_name"].startswith("v") and not ver["prerelease"] and not ver["tag_name"].find("-pre") > 0 and ver["tag_name"], remoteVersions), None)
         elif selectedBranch == 1:
             logger.debug("release type: pre-release")
-            self.remoteVer = next(filter(lambda ver: ver["prerelease"] and ver["tag_name"].startswith("v") and ver["tag_name"].find("-pre"), remoteVersions), None)
+            self.remoteVer = next(filter(lambda ver:ver["tag_name"].startswith("v"), remoteVersions), None)
         else:
             logger.error("release type: NOT FOUND")
             raise ValueError("no valid branch found")
@@ -137,48 +152,61 @@ class Updater:
 
     async def do_update(self):
         logger.debug("Starting update.")
+        try:
+            assert self.remoteVer
+        except AssertionError:
+            logger.error("Unable to update as remoteVer is missing")
+            return
+
         version = self.remoteVer["tag_name"]
-        download_url = self.remoteVer["assets"][0]["browser_download_url"]
+        download_url = None
+        download_filename = "PluginLoader" if ON_LINUX else "PluginLoader.exe"
+        download_temp_filename = download_filename + ".new"
+
+        for x in self.remoteVer["assets"]:
+            if x["name"] == download_filename:
+                download_url = x["browser_download_url"]
+                break
+        
+        if download_url == None:
+            raise Exception("Download url not found")
+
         service_url = self.get_service_url()
         logger.debug("Retrieved service URL")
 
         tab = await get_gamepadui_tab()
         await tab.open_websocket()
         async with ClientSession() as web:
-            logger.debug("Downloading systemd service")
-            # download the relevant systemd service depending upon branch
-            async with web.request("GET", service_url, ssl=helpers.get_ssl_context(), allow_redirects=True) as res:
-                logger.debug("Downloading service file")
-                data = await res.content.read()
-            logger.debug(str(data))
-            service_file_path = path.join(getcwd(), "plugin_loader.service")
-            try:
-                with open(path.join(getcwd(), "plugin_loader.service"), "wb") as out:
-                    out.write(data)
-            except Exception as e:
-                logger.error(f"Error at %s", exc_info=e)
-            with open(path.join(getcwd(), "plugin_loader.service"), "r", encoding="utf-8") as service_file:
-                service_data = service_file.read()
-            service_data = service_data.replace("${HOMEBREW_FOLDER}", helpers.get_homebrew_path())
-            with open(path.join(getcwd(), "plugin_loader.service"), "w", encoding="utf-8") as service_file:
-                    service_file.write(service_data)
+            if ON_LINUX and not get_keep_systemd_service():
+                logger.debug("Downloading systemd service")
+                # download the relevant systemd service depending upon branch
+                async with web.request("GET", service_url, ssl=helpers.get_ssl_context(), allow_redirects=True) as res:
+                    logger.debug("Downloading service file")
+                    data = await res.content.read()
+                logger.debug(str(data))
+                service_file_path = path.join(getcwd(), "plugin_loader.service")
+                try:
+                    with open(path.join(getcwd(), "plugin_loader.service"), "wb") as out:
+                        out.write(data)
+                except Exception as e:
+                    logger.error(f"Error at %s", exc_info=e)
+                with open(path.join(getcwd(), "plugin_loader.service"), "r", encoding="utf-8") as service_file:
+                    service_data = service_file.read()
+                service_data = service_data.replace("${HOMEBREW_FOLDER}", helpers.get_homebrew_path())
+                with open(path.join(getcwd(), "plugin_loader.service"), "w", encoding="utf-8") as service_file:
+                        service_file.write(service_data)
                     
-            logger.debug("Saved service file")
-            logger.debug("Copying service file over current file.")
-            shutil.copy(service_file_path, "/etc/systemd/system/plugin_loader.service")
-            if not os.path.exists(path.join(getcwd(), ".systemd")):
-                os.mkdir(path.join(getcwd(), ".systemd"))
-            shutil.move(service_file_path, path.join(getcwd(), ".systemd")+"/plugin_loader.service")
+                logger.debug("Saved service file")
+                logger.debug("Copying service file over current file.")
+                shutil.copy(service_file_path, "/etc/systemd/system/plugin_loader.service")
+                if not os.path.exists(path.join(getcwd(), ".systemd")):
+                    os.mkdir(path.join(getcwd(), ".systemd"))
+                shutil.move(service_file_path, path.join(getcwd(), ".systemd")+"/plugin_loader.service")
             
             logger.debug("Downloading binary")
             async with web.request("GET", download_url, ssl=helpers.get_ssl_context(), allow_redirects=True) as res:
                 total = int(res.headers.get('content-length', 0))
-                # we need to not delete the binary until we have downloaded the new binary!
-                try:
-                    remove(path.join(getcwd(), "PluginLoader"))
-                except:
-                    pass
-                with open(path.join(getcwd(), "PluginLoader"), "wb") as out:
+                with open(path.join(getcwd(), download_temp_filename), "wb") as out:
                     progress = 0
                     raw = 0
                     async for c in res.content.iter_chunked(512):
@@ -192,12 +220,19 @@ class Updater:
             with open(path.join(getcwd(), ".loader.version"), "w", encoding="utf-8") as out:
                 out.write(version)
 
-            call(['chmod', '+x', path.join(getcwd(), "PluginLoader")])
+            if ON_LINUX:
+                remove(path.join(getcwd(), download_filename))
+                shutil.move(path.join(getcwd(), download_temp_filename), path.join(getcwd(), download_filename))
+                chmod(path.join(getcwd(), download_filename), 777, False)
+                if get_selinux():
+                    from asyncio.subprocess import create_subprocess_exec
+                    process = await create_subprocess_exec("chcon", "-t", "bin_t", path.join(getcwd(), download_filename))
+                    logger.info(f"Setting the executable flag with chcon returned {await process.wait()}")
+
             logger.info("Updated loader installation.")
             await tab.evaluate_js("window.DeckyUpdater.finish()", False, False)
             await self.do_restart()
             await tab.close_websocket()
 
     async def do_restart(self):
-        call(["systemctl", "daemon-reload"])
-        call(["systemctl", "restart", "plugin_loader"])
+        await service_restart("plugin_loader")

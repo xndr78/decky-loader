@@ -7,15 +7,18 @@ import typescript from '@rollup/plugin-typescript';
 import { defineConfig } from 'rollup';
 import del from 'rollup-plugin-delete';
 import externalGlobals from 'rollup-plugin-external-globals';
+import { visualizer } from 'rollup-plugin-visualizer';
 
 const hiddenWarnings = ['THIS_IS_UNDEFINED', 'EVAL'];
 
 export default defineConfig({
-  input: 'src/index.tsx',
+  input: 'src/index.ts',
   plugins: [
     del({ targets: '../backend/static/*', force: true }),
     commonjs(),
-    nodeResolve(),
+    nodeResolve({
+      browser: true,
+    }),
     externalGlobals({
       react: 'SP_REACT',
       'react-dom': 'SP_REACTDOM',
@@ -31,6 +34,7 @@ export default defineConfig({
       'process.env.NODE_ENV': JSON.stringify('production'),
     }),
     image(),
+    visualizer(),
   ],
   preserveEntrySignatures: false,
   output: {

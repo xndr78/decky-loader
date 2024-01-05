@@ -22,6 +22,8 @@ declare global {
   }
 }
 
+const isPatched = Symbol('is patched');
+
 class RouterHook extends Logger {
   private router: any;
   private memoizedRouter: any;
@@ -90,9 +92,10 @@ class RouterHook extends Logger {
               ...routeList[index].props,
               children: {
                 ...cloneElement(routeList[index].props.children),
-                type: (props) => createElement(oType, props),
+                type: routeList[index].props.children[isPatched] ? oType : (props) => createElement(oType, props),
               },
             }).children;
+            routeList[index].props.children[isPatched] = true;
           });
         }
       });
@@ -123,11 +126,9 @@ class RouterHook extends Logger {
     this.wrapperPatch = afterPatch(this.gamepadWrapper, 'render', (_: any, ret: any) => {
       if (ret?.props?.children?.props?.children?.length == 5 || ret?.props?.children?.props?.children?.length == 4) {
         const idx = ret?.props?.children?.props?.children?.length == 4 ? 1 : 2;
-        if (
-          ret.props.children.props.children[idx]?.props?.children?.[0]?.type?.type
-            ?.toString()
-            ?.includes('GamepadUI.Settings.Root()')
-        ) {
+        const potentialSettingsRootString =
+          ret.props.children.props.children[idx]?.props?.children?.[0]?.type?.type?.toString() || '';
+        if (potentialSettingsRootString?.includes('Settings.Root()')) {
           if (!this.router) {
             this.router = ret.props.children.props.children[idx]?.props?.children?.[0]?.type;
             this.routerPatch = afterPatch(this.router, 'type', (_: any, ret: any) => {

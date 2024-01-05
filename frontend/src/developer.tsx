@@ -1,66 +1,50 @@
-import {
-  Navigation,
-  ReactRouter,
-  Router,
-  fakeRenderComponent,
-  findInReactTree,
-  findInTree,
-  findModule,
-  findModuleChild,
-  gamepadDialogClasses,
-  gamepadSliderClasses,
-  playSectionClasses,
-  quickAccessControlsClasses,
-  quickAccessMenuClasses,
-  scrollClasses,
-  scrollPanelClasses,
-  sleep,
-  staticClasses,
-  updaterFieldClasses,
-} from 'decky-frontend-lib';
+import { sleep } from 'decky-frontend-lib';
 import { FaReact } from 'react-icons/fa';
 
 import Logger from './logger';
 import { getSetting } from './utils/settings';
+import TranslationHelper, { TranslationClass } from './utils/TranslationHelper';
 
 const logger = new Logger('DeveloperMode');
 
 let removeSettingsObserver: () => void = () => {};
 
-export async function setShowValveInternal(show: boolean) {
-  let settingsMod: any;
-  while (!settingsMod) {
-    settingsMod = findModuleChild((m) => {
-      if (typeof m !== 'object') return undefined;
-      for (let prop in m) {
-        if (typeof m[prop]?.settings?.bIsValveEmail !== 'undefined') return m[prop];
-      }
-    });
-    if (!settingsMod) {
-      logger.debug('[ValveInternal] waiting for settingsMod');
-      await sleep(1000);
-    }
+declare global {
+  interface Window {
+    settingsStore: any;
   }
+}
 
+export async function setShowValveInternal(show: boolean) {
   if (show) {
-    removeSettingsObserver = settingsMod[
-      Object.getOwnPropertySymbols(settingsMod).find((x) => x.toString() == 'Symbol(mobx administration)') as any
-    ].observe((e: any) => {
+    const mobx =
+      window.settingsStore[
+        Object.getOwnPropertySymbols(window.settingsStore).find(
+          (x) => x.toString() == 'Symbol(mobx administration)',
+        ) as any
+      ];
+
+    removeSettingsObserver = (mobx.observe_ || mobx.observe).call(mobx, (e: any) => {
       e.newValue.bIsValveEmail = true;
     });
-    settingsMod.m_Settings.bIsValveEmail = true;
+
+    window.settingsStore.m_Settings.bIsValveEmail = true;
     logger.log('Enabled Valve Internal menu');
   } else {
     removeSettingsObserver();
-    settingsMod.m_Settings.bIsValveEmail = false;
+    window.settingsStore.m_Settings.bIsValveEmail = false;
     logger.log('Disabled Valve Internal menu');
   }
 }
 
 export async function setShouldConnectToReactDevTools(enable: boolean) {
   window.DeckyPluginLoader.toaster.toast({
-    title: (enable ? 'Enabling' : 'Disabling') + ' React DevTools',
-    body: 'Reloading in 5 seconds',
+    title: enable ? (
+      <TranslationHelper trans_class={TranslationClass.DEVELOPER} trans_text={'enabling'} />
+    ) : (
+      <TranslationHelper trans_class={TranslationClass.DEVELOPER} trans_text={'disabling'} />
+    ),
+    body: <TranslationHelper trans_class={TranslationClass.DEVELOPER} trans_text={'5secreload'} />,
     icon: <FaReact />,
   });
   await sleep(5000);
@@ -77,29 +61,4 @@ export async function startup() {
 
   if ((isRDTEnabled && !window.deckyHasConnectedRDT) || (!isRDTEnabled && window.deckyHasConnectedRDT))
     setShouldConnectToReactDevTools(isRDTEnabled);
-
-  logger.log('Exposing decky-frontend-lib APIs as DFL');
-  window.DFL = {
-    findModuleChild,
-    findModule,
-    Navigation,
-    Router,
-    ReactRouter,
-    ReactUtils: {
-      fakeRenderComponent,
-      findInReactTree,
-      findInTree,
-    },
-    classes: {
-      scrollClasses,
-      staticClasses,
-      playSectionClasses,
-      scrollPanelClasses,
-      updaterFieldClasses,
-      gamepadDialogClasses,
-      gamepadSliderClasses,
-      quickAccessMenuClasses,
-      quickAccessControlsClasses,
-    },
-  };
 }

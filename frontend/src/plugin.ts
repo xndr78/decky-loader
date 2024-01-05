@@ -5,4 +5,11 @@ export interface Plugin {
   content?: JSX.Element;
   onDismount?(): void;
   alwaysRender?: boolean;
+  titleView?: JSX.Element;
+}
+
+export enum InstallType {
+  INSTALL,
+  REINSTALL,
+  UPDATE,
 }

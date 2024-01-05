@@ -1,5 +1,5 @@
 // TabsHook for versions after the Desktop merge
-import { Patch, QuickAccessTab, afterPatch, findInReactTree, sleep } from 'decky-frontend-lib';
+import { Patch, QuickAccessTab, afterPatch, findInReactTree, getReactRoot, sleep } from 'decky-frontend-lib';
 
 import { QuickAccessVisibleStateProvider } from './components/QuickAccessVisibleState';
 import Logger from './logger';
@@ -32,11 +32,11 @@ class TabsHook extends Logger {
   }
 
   init() {
-    const tree = (document.getElementById('root') as any)._reactRootContainer._internalRoot.current;
+    const tree = getReactRoot(document.getElementById('root') as any);
     let qAMRoot: any;
     const findQAMRoot = (currentNode: any, iters: number): any => {
-      if (iters >= 55) {
-        // currently 45
+      if (iters >= 80) {
+        // currently 67
         return null;
       }
       if (
@@ -128,22 +128,26 @@ class TabsHook extends Logger {
     let deckyTabAmount = existingTabs.reduce((prev: any, cur: any) => (cur.decky ? prev + 1 : prev), 0);
     if (deckyTabAmount == this.tabs.length) {
       for (let tab of existingTabs) {
-        if (tab?.decky) tab.panel.props.setter[0](visible);
+        if (tab?.decky) {
+          if (tab?.qAMVisibilitySetter) {
+            tab?.qAMVisibilitySetter(visible);
+          } else {
+            tab.initialVisibility = visible;
+          }
+        }
       }
       return;
     }
     for (const { title, icon, content, id } of this.tabs) {
-      existingTabs.push({
+      const tab: any = {
         key: id,
         title,
         tab: icon,
         decky: true,
-        panel: (
-          <QuickAccessVisibleStateProvider initial={visible} setter={[]}>
-            {content}
-          </QuickAccessVisibleStateProvider>
-        ),
-      });
+        initialVisibility: visible,
+      };
+      tab.panel = <QuickAccessVisibleStateProvider tab={tab}>{content}</QuickAccessVisibleStateProvider>;
+      existingTabs.push(tab);
     }
   }
 }
